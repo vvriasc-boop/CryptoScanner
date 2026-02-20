@@ -1,102 +1,124 @@
 # CryptoScanner — Event-Driven Crypto Analysis
 
 ## Что делает
-Сканер крипто-событий для поиска недооценённых токенов.
-- **Шаг 1**: Сбор новостей из API → AI-парсинг → извлечение событий
-- **Шаг 2**: Генерация MECE-исходов (шаблон для 7 типов + Groq AI для остальных)
-- Шаг 3 (planned): Оценка вероятностей исходов
+Сканер крипто-событий для поиска недооценённых токенов. 6-шаговый пайплайн:
+- **Шаг 1**: Parallel Search → AI-парсинг → извлечение событий в events_v2
+- **Шаг 2**: Генерация MECE-исходов (шаблон для 7 типов + AI для остальных)
+- **Шаг 3**: Оценка вероятностей исходов (multi-temperature, 3 итерации → медиана)
+- **Шаг 4**: Оценка ценового влияния (multi-temperature + sign validation)
+- **Шаг 5**: Расчёт E[return] = Σ(P × impact) → LONG/SHORT/NEUTRAL сигналы
+- **Шаг 6**: Генерация текстового отчёта с полной цепочкой рассуждений
+
+Запуск: `python3 tools/run_pipeline.py` (5 тестовых) или `--full` (50 токенов).
 
 ## Источники данных
 | API | Статус | Назначение | Ключ |
 |-----|--------|-----------|------|
+| Parallel Search | **OK** | Веб-поиск событий (основной) | .env PARALLEL_API_KEY |
+| AI providers (5) | **OK** | Парсинг, вероятности, импакты | .env (5 ключей) |
 | Binance Announce | **OK** | Листинги/делистинги (POST скрапинг) | не нужен |
-| Groq AI | **OK** | Парсинг новостей → события + генерация исходов | .env GROQ_API_KEY |
-| CoinGecko | **OK** | Метаданные, цены, категории | .env |
-| CoinMarketCap | **OK** | Рыночные данные, маппинг | .env |
+| CoinGecko | **OK** | Метаданные, цены, категории | .env COINGECKO_API_KEY |
+| CoinMarketCap | **OK** | Рыночные данные, маппинг | .env CMC_API_KEY |
 | Snapshot | **OK** | DAO governance proposals | не нужен |
 | Coindar | **WAIT** | Крипто-события | .env (ожидает верификации) |
-| CoinMarketCal | **403** | Нужен платный RapidAPI план |  .env RAPIDAPI_KEY |
-| CryptoPanic | **404** | Токен не активирован или API отключён | .env CRYPTOPANIC_TOKEN |
+| CoinMarketCal | **403** | Нужен платный RapidAPI план | .env RAPIDAPI_KEY |
+| CryptoPanic | **404** | Токен не активирован | .env CRYPTOPANIC_TOKEN |
 | cryptocurrency.cv | **DEAD** | Таймаут, домен мёртв | не нужен |
-| Google News RSS | **DNS** | Заблокирован на сервере (224.0.0.x) | не нужен |
+| Google News RSS | **DNS** | Заблокирован на сервере | не нужен |
+
+### AI-провайдеры (ротация в groq_client.py)
+| Провайдер | Модель | RPM | Качество JSON |
+|-----------|--------|-----|---------------|
+| groq | llama-3.3-70b-versatile | 30 | высокое |
+| cohere | command-a-03-2025 | 20 | высокое |
+| cerebras | llama3.1-8b | 30 | низкое (8B) |
+| sambanova | Meta-Llama-3.3-70B-Instruct | 30 | высокое |
+| github | Meta-Llama-3.3-70B-Instruct | 15 | высокое |
 
 ## Структура файлов
 ```
 CryptoScanner/
-├── main.py                    <- заглушка (будет Telegram-бот)
-├── config.py                  <- ключи, URL, BINANCE_SYMBOLS, OUTCOME_* константы
-├── database/db.py             <- SQLite: 9 таблиц (sync + async функции)
+├── main.py                        <- заглушка (будет Telegram-бот)
+├── config.py                      <- ключи, пороги, TOP_EXCLUDE, константы
+├── database/db.py                 <- SQLite: sync + async функции, 9 таблиц
 ├── services/
-│   ├── coindar.py             <- CoindarClient
-│   ├── coingecko.py           <- CoinGeckoClient
-│   ├── coinmarketcap.py       <- CoinMarketCapClient
-│   ├── coinmarketcal_events.py <- CoinMarketCalClient (RapidAPI, 403)
-│   ├── news_cryptocv.py       <- CryptoCVClient (dead)
-│   ├── news_cryptopanic.py    <- CryptoPanicClient (404)
-│   ├── news_binance.py        <- BinanceAnnouncementsClient (OK)
-│   ├── news_google.py         <- GoogleNewsClient (DNS-блокировка)
-│   ├── event_extractor.py     <- Groq AI: новости → события (sync, requests)
-│   ├── groq_client.py         <- Общий async-клиент Groq API (httpx)
-│   ├── outcome_templates.py   <- Шаблоны исходов для 7 типов событий
-│   ├── outcome_generator.py   <- generate_outcomes(): шаблон + AI + fallback
-│   └── snapshot.py            <- SnapshotClient (GraphQL)
+│   ├── groq_client.py             <- AI-клиент с 5-provider rotation (async)
+│   ├── parallel_client.py         <- Parallel Search API клиент
+│   ├── token_scanner.py           <- Шаг 1: поиск событий для токена
+│   ├── binance_tokens.py          <- Список фьючерсных токенов Binance
+│   ├── outcome_generator.py       <- Шаг 2: генерация MECE-исходов
+│   ├── outcome_templates.py       <- Шаблоны исходов для 7 типов событий
+│   ├── probability_estimator.py   <- Шаг 3: оценка вероятностей (multi-T)
+│   ├── impact_estimator.py        <- Шаг 4: оценка импактов + sign validation
+│   ├── signal_calculator.py       <- Шаги 5-6: E[return], сигналы, дедупликация
+│   ├── event_extractor.py         <- Groq AI: новости → события (sync, legacy)
+│   ├── coindar.py                 <- CoindarClient
+│   ├── coingecko.py               <- CoinGeckoClient
+│   ├── coinmarketcap.py           <- CoinMarketCapClient
+│   ├── snapshot.py                <- SnapshotClient (GraphQL)
+│   ├── news_binance.py            <- BinanceAnnouncementsClient
+│   ├── coinmarketcal_events.py    <- CoinMarketCalClient (403)
+│   ├── news_cryptocv.py           <- CryptoCVClient (dead)
+│   ├── news_cryptopanic.py        <- CryptoPanicClient (404)
+│   └── news_google.py             <- GoogleNewsClient (DNS-блокировка)
 ├── prompts/
-│   ├── extract_events.md      <- Промпт для AI-извлечения событий
-│   └── generate_outcomes.md   <- Промпт для AI-генерации исходов
+│   ├── extract_token_events.md    <- Промпт для Шага 1 (AI-извлечение событий)
+│   ├── generate_outcomes.md       <- Промпт для Шага 2 (AI-генерация исходов)
+│   ├── estimate_probabilities.md  <- Промпт для Шага 3 (оценка вероятностей)
+│   ├── estimate_impact.md         <- Промпт для Шага 4 (оценка импактов)
+│   └── extract_events.md          <- Legacy промпт (sync Шаг 1)
 ├── tools/
-│   ├── explore.py             <- Multi-API explorer (CoinGecko, CMC, Snapshot)
-│   ├── explore_events.py      <- CoinMarketCal explorer (403)
-│   ├── explore_news.py        <- News sources + AI explorer (Шаг 1)
-│   ├── explore_outcomes.py    <- Тест генерации исходов (Шаг 2)
-│   └── test_pipeline.py       <- Тест полного пайплайна Шаг 1 → Шаг 2
-└── reports/                   <- .txt + .json отчёты
+│   ├── run_pipeline.py            <- Полный пайплайн 6 шагов (--full / test)
+│   ├── generate_report.py         <- Генератор отчёта с цепочкой рассуждений
+│   ├── cleanup_db.py              <- Очистка БД от мусора и TOP_EXCLUDE
+│   ├── explore_scanner.py         <- Тест token_scanner (Шаг 1)
+│   ├── explore_outcomes.py        <- Тест генерации исходов (Шаг 2)
+│   ├── explore_probabilities.py   <- Тест оценки вероятностей (Шаг 3)
+│   ├── explore_impacts.py         <- Тест оценки импактов (Шаг 4)
+│   ├── explore_signals.py         <- Тест расчёта сигналов (Шаги 5-6)
+│   ├── explore.py                 <- Multi-API explorer (CoinGecko, CMC, Snapshot)
+│   ├── explore_events.py          <- CoinMarketCal explorer (403)
+│   ├── explore_news.py            <- News sources + AI explorer (legacy)
+│   └── test_pipeline.py           <- Тест связки Шаг 1 → Шаг 2 (legacy)
+└── reports/                       <- signal_report_YYYY-MM-DD.txt, api_research.txt
 ```
 
 ## Запуск
 ```bash
 pip install -r requirements.txt
-python3 tools/explore.py           # Multi-API explorer
-python3 tools/explore_news.py      # Шаг 1: сбор новостей + AI-парсинг
-python3 tools/explore_outcomes.py  # Шаг 2: генерация исходов (тестовые данные)
-python3 tools/test_pipeline.py     # Тест связки Шаг 1 → Шаг 2
+python3 tools/run_pipeline.py          # Test mode: 5 токенов
+python3 tools/run_pipeline.py --full   # Full mode: 50 токенов (~13 мин)
+python3 tools/generate_report.py       # Генерация отчёта из БД
+python3 tools/cleanup_db.py            # Очистка мусора из БД (интерактивная)
 ```
 
 ## Таблицы БД (scanner.db)
 | Таблица | Поток | Назначение |
 |---------|-------|-----------|
+| events_v2 | Шаги 1-6 (async) | События: TEXT id (MD5), title, outcomes_generated |
+| event_outcomes | Шаги 2-6 (async) | MECE-исходы: probability, price_impact_pct, low/high |
+| events | Legacy (sync) | События: INTEGER id, caption, date_start |
+| raw_news | Legacy (sync) | Сырые новости из всех источников |
 | tags | Coindar → explore.py | Категории событий |
 | coins_coindar | Coindar | Монеты (id, symbol) |
 | coins_coingecko | CoinGecko | Монеты (slug id, symbol) |
 | coins_cmc | CMC | Монеты (cmc_id, symbol) |
-| events | Шаг 1 (sync) | События: INTEGER id, caption, date_start |
-| raw_news | Шаг 1 (sync) | Сырые новости из всех источников |
-| events_v2 | Шаг 2 (async) | События: TEXT id (MD5), title, outcomes_generated |
-| event_outcomes | Шаг 2 (async) | 3-4 MECE-исхода на событие |
 | proposals | Snapshot | DAO governance proposals |
 
 ## Critical Rules
-1. **Две таблицы событий**: `events` (Шаг 1, sync, INTEGER id) и `events_v2` (Шаг 2, async, TEXT MD5 id) — разные схемы, не смешивать
+1. **Две таблицы событий**: `events` (legacy, sync, INTEGER id) и `events_v2` (основная, async, TEXT MD5 id) — разные схемы, не смешивать
 2. **sys.path.insert(0, ...)**: обязателен в каждом tools/*.py для импортов из корня проекта
 3. **Промпты в prompts/*.md**: подстановка через `.replace()` — НЕ `.format()`, НЕ f-string (фигурные скобки в JSON)
 4. **AI-парсинг JSON**: json.loads() → regex `\[.*\]` → regex `\{.*\}` → fallback (3 уровня)
-5. **Rate limits**: CoinGecko 2с, CMC 2с, Binance 2с, Groq 1с, Google News 2с; при 429 → sleep + retry
-6. **Каждый API в отдельном try/except**: падение одного не ломает остальные
-7. **CoinGecko ID = slug** ("bitcoin"), не символ ("BTC") — для топ-монет использовать хардкод `COINGECKO_ID_MAP`
+5. **call_groq() — единая точка входа для AI**: сигнатура `call_groq(prompt, model, temperature, max_tokens, timeout) → str`. Все 5 провайдеров под капотом, вызывающий код не знает о ротации
+6. **Sign validation обязательна**: `_validate_sign_logic()` в impact_estimator.py проверяет что не все импакты одного знака. Без неё AI может выдать all-negative для unlock events
+7. **TOP_EXCLUDE**: BTC, ETH, BNB, SOL, XRP, ADA, DOGE, TRX, TON, AVAX — исключаются из сканирования и из БД (cleanup_db.py)
 
 ## Lessons Learned
-- **Нерабочие источники** (проверено многократно, напрямую + через прокси): CoinMarketCal → 403 (нужен платный RapidAPI), CryptoPanic → 404 HTML, cryptocurrency.cv → timeout (мёртв), Google News RSS → DNS-блокировка на сервере (224.0.0.x). Не рассчитывать как источники, периодически перепроверять.
-- **Binance Announcements — основной рабочий источник**: POST к `/bapi/composite/v1/public/cms/article/list/query`. catalogId: 48=листинги, 131=делистинги. Поля: id, code, title, type, releaseDate (ms).
-- **Groq AI-парсинг работает**: llama-3.3-70b-versatile, чанки по 30 новостей, temperature=0.1. Конверсия ~55%. Для исходов: 7 типов по шаблону (мгновенно), остальные через AI с 3 попытками + generic fallback.
-- **SQLite: выражения в UNIQUE constraint запрещены**: `UNIQUE(col1, COALESCE(col2, -1))` → `OperationalError`. Решение: `CREATE UNIQUE INDEX`.
-- **CoinGecko symbol→id неоднозначен**: один symbol может быть у десятков мем-коинов. Хардкод `COINGECKO_ID_MAP` в config.py обязателен для топ-монет.
-- **Sync + Async сосуществуют**: Шаг 1 (requests + sqlite3), Шаг 2 (httpx + aiosqlite). Для db.py — sync функции используют внутренний _connect(), async функции принимают db параметр.
-- **events_v2 отдельная таблица**: создана вместо модификации events, чтобы не ломать Шаг 1. TEXT id (MD5 hash от coin_symbol+event_type+title). Будущая миграция объединит.
-
-### Шаг 2: Генерация исходов (Outcome Generation)
-- services/groq_client.py — async-клиент Groq API с retry (429→10s, 5xx→5/15/45s)
-- services/outcome_templates.py — OUTCOME_TEMPLATES (7 типов) + GENERIC_OUTCOMES
-- services/outcome_generator.py — generate_outcomes(): шаблон → AI → generic fallback
-- prompts/generate_outcomes.md — промпт для AI-генерации нестандартных типов
-- validate_outcomes(): 3-4 исхода, уникальные ключи, category ∈ {positive, neutral, negative, cancelled}, 1+ positive, 1+ negative/cancelled
-- Тест: python3 tools/explore_outcomes.py (5 событий: 4 шаблон + 1 AI, 0 ошибок)
-- Pipeline: python3 tools/test_pipeline.py (20 статей → 4 события → 3 исхода, 0 ошибок)
+- **AI-провайдер ротация решает rate limits**: с 1 провайдером (Groq, 30 rpm) — 96 ошибок 429, 29 failed токенов. С 5 провайдерами — 11 ошибок 429, 0 failed, ~110 rpm суммарная ёмкость.
+- **Cerebras 8B модель ненадёжна для JSON**: Возвращает 200 OK, но structured output (impact estimation JSON) часто невалидный. Пригоден только для простых текстовых задач. Groq/Cohere/SambaNova (70B модели) надёжны.
+- **AI считает price predictions за события**: "1000CAT Price Prediction 2026-2030" → listing. Фикс: явный junk-фильтр в промпте extract_token_events.md + cleanup_db.py для очистки.
+- **AI генерирует все отрицательные импакты для unlock**: "tokens held" = -4.5% (должно быть +). Фикс: калибровка unlock в промпте estimate_impact.md + `_validate_sign_logic()` как страховка.
+- **Бесплатных unlock API нет**: Tokenomist=$249/мес, DefiLlama emissions=платный, CryptoRank/CoinMarketCal=платные. Лучшая стратегия: Parallel Search + AI-парсинг веб-страниц. CoinPaprika — единственный бесплатный events API (только BTC/ETH).
+- **Binance Announcements — основной рабочий источник**: POST к `/bapi/composite/v1/public/cms/article/list/query`. catalogId: 48=листинги, 131=делистинги.
+- **CoinGecko ID = slug** ("bitcoin"), не символ ("BTC") — для топ-монет хардкод `COINGECKO_ID_MAP` в config.py.
