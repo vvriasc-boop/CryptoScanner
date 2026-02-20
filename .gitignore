@@ -1,0 +1,7 @@
+.env
+scanner.db
+__pycache__/
+*.pyc
+reports/
+.claude/
+claude_via_proxychains
